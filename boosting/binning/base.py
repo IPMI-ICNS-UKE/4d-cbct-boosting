@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from boosting.utils import filter_kwargs
+
 import numpy as np
 
 
@@ -58,7 +58,6 @@ class Binning(ABC):
     @staticmethod
     def _interpolate_nans(a):
         is_nan, get_nan_idx = np.isnan(a), lambda z: np.where(z)[0]
-        a[is_nan] = np.interp(get_nan_idx(is_nan), get_nan_idx(~is_nan),
-                              a[~is_nan])
+        a[is_nan] = np.interp(get_nan_idx(is_nan), get_nan_idx(~is_nan), a[~is_nan])
 
         return a

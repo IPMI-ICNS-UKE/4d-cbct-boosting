@@ -1,8 +1,26 @@
-import subprocess
 from pathlib import Path
-from typing import Generator, Tuple
+from typing import Tuple, Optional
 
+import SimpleITK as sitk
+import docker
 import numpy as np
+from docker.errors import ImageNotFound
+
+from boosting.common_types import PathLike, PositiveNumber
+
+
+def check_docker_image_exists(
+    image_name: str, raise_error: bool = False
+) -> Optional[bool]:
+    docker_client = docker.from_env()
+    try:
+        docker_client.images.get(image_name)
+        return True
+    except ImageNotFound:
+        if raise_error:
+            raise
+        else:
+            return False
 
 
 def rescale_range(
@@ -21,7 +39,7 @@ def rescale_range(
 
 def crop_or_pad(
     image: np.ndarray, target_shape: Tuple[int, ...], pad_value: float = 0.0
-):
+) -> Tuple[np.ndarray, Tuple[slice, ...]]:
     valid_content_slicing = [slice(None, None)] * image.ndim
 
     for i_axis in range(image.ndim):
@@ -51,40 +69,7 @@ def crop_or_pad(
     return image, tuple(valid_content_slicing)
 
 
-def to_path(*args) -> Generator:
-    for arg in args:
-        if arg:
-            yield Path(arg)
-        else:
-            yield None
-
-
-def filter_kwargs(valid_keys, **kwargs):
-    return {k: v for k, v in kwargs.items() if k in valid_keys}
-
-
-def create_bin_call(base_call, prefix="--", **kwargs):
-    bc = list(base_call)
-    for key, value in kwargs.items():
-        if value is None:
-            # skip None values
-            continue
-        if key.endswith("_"):
-            key = key[:-1]
-        bc.append(f"{prefix}{key}")
-        if isinstance(value, list) or isinstance(value, tuple):
-            bc.append(",".join([str(i) for i in value]))
-        else:
-            bc.append(str(value))
-
-    return bc
-
-
-def call(bin_call):
-    return subprocess.check_output(bin_call)
-
-
-def iec61217_to_rsp(image):
+def iec61217_to_rsp(image: sitk.Image) -> sitk.Image:
     size = image.GetSize()
     spacing = image.GetSpacing()
     dimension = image.GetDimension()
@@ -109,7 +94,46 @@ def iec61217_to_rsp(image):
         origin = np.add(
             origin, (spacing[0] / 2, -spacing[1] / 2, -spacing[2] / 2, spacing[0] / 2)
         )
+    else:
+        ValueError(f"Cannot handle {dimension}D images")
 
     image.SetOrigin(origin)
 
     return image
+
+
+def resample_itk_image(
+    image: sitk.Image,
+    new_spacing: Tuple[PositiveNumber, PositiveNumber, PositiveNumber],
+    resampler=sitk.sitkLinear,
+    default_voxel_value=0.0,
+):
+    original_spacing = image.GetSpacing()
+    original_size = image.GetSize()
+    new_size = [
+        int(round(original_size[0] * (original_spacing[0] / new_spacing[0]))),
+        int(round(original_size[1] * (original_spacing[1] / new_spacing[1]))),
+        int(round(original_size[2] * (original_spacing[2] / new_spacing[2]))),
+    ]
+    resampled_img = sitk.Resample(
+        image,
+        new_size,
+        sitk.Transform(),
+        resampler,
+        image.GetOrigin(),
+        new_spacing,
+        image.GetDirection(),
+        default_voxel_value,
+        image.GetPixelID(),
+    )
+    return resampled_img
+
+
+def replace_root(path: PathLike, new_root: PathLike) -> Path:
+    path = Path(path)
+    new_root = Path(new_root)
+
+    if not new_root.is_absolute():
+        raise ValueError("new_root has to be an absolute path")
+
+    return new_root / path.relative_to("/")

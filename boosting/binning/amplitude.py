@@ -21,41 +21,31 @@ class AmplitudeBinning(Binning):
     def _bin_phase_array(self, signal, bins_left, bins_right):
         phase_binned = np.zeros(len(signal), dtype=np.int16)
         for i, p in enumerate(signal):
-            for bin_number, (b_left, b_right) in enumerate(
-                    zip(bins_left, bins_right)):
+            for bin_number, (b_left, b_right) in enumerate(zip(bins_left, bins_right)):
                 if 0 < bin_number < self.n_bins and b_left <= p < b_right:
                     phase_binned[i] = bin_number
         return phase_binned
 
     def _calculate_bins(self, signal):
         bins_centers = np.linspace(0, 360, self.n_bins + 1)
-        bins_left = self._mod_phase_bins(
-            bins_centers - 360.0 / (2 * self.n_bins))
-        bins_right = self._mod_phase_bins(
-            bins_centers + 360.0 / (2 * self.n_bins))
-        return self._bin_phase_array(signal, bins_left,
-                                     bins_right)
+        bins_left = self._mod_phase_bins(bins_centers - 360.0 / (2 * self.n_bins))
+        bins_right = self._mod_phase_bins(bins_centers + 360.0 / (2 * self.n_bins))
+        return self._bin_phase_array(signal, bins_left, bins_right)
 
     def get_bin_idx(self, i_bin):
         try:
             return np.where(self._bin_idx == i_bin)[0]
         except IndexError:
-            raise IndexError('No projections found for this bin!')
+            raise IndexError("No projections found for this bin!")
 
     @property
     def _valid_kwargs(self):
-        return ('path',
-                'geometry',
-                'regexp',
-                'out_geometry',
-                'out_proj',
-                'list')
+        return ("path", "geometry", "regexp", "out_geometry", "out_proj", "list")
 
     def _bin_projections(self, i_bin, **kwargs):
-        base_call = ['/home/fmadesta/software/rtk/built_v2.0.0/bin/rtksubselect',
-                     '-v']
+        base_call = ["/home/fmadesta/software/rtk/built_v2.0.0/bin/rtksubselect", "-v"]
 
-        kwargs['list'] = ','.join(self.get_bin_idx(i_bin).astype(str))
+        kwargs["list"] = ",".join(self.get_bin_idx(i_bin).astype(str))
         bin_call = create_bin_call(base_call, **kwargs)
         return call(bin_call)
 
@@ -72,5 +62,5 @@ class AmplitudeBinning(Binning):
         return phase_binning
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     signal = np.sin(np.linspace(0, 6, 100))

@@ -1,33 +1,40 @@
+from __future__ import annotations
+
+import logging
 import pickle
-from pathlib import Path
-from tempfile import TemporaryDirectory
-from typing import Optional, Dict, Union, Tuple
+from typing import Union, Tuple, List
 
 import SimpleITK as sitk
 import numpy as np
 from torch.utils.data import Dataset
 
-from boosting.binning.phase import PseudoAverageBinning
-from boosting.reconstruction import presets
-from boosting.reconstruction.fdk import FDKReconstructor
-from boosting.reconstruction.cg import CGReconstructor
-from boosting.reconstruction.rooster import ROOSTER4DReconstructor
 from boosting.common_types import PathLike
-from boosting.utils import to_path, rescale_range, crop_or_pad
+from boosting.learning.patching import PatchExtractor
+from boosting.logger import init_fancy_logging
+from boosting.utils import rescale_range, crop_or_pad
+
+logger = logging.getLogger(__name__)
 
 
 class CBCTBoostingDataset(Dataset):
     def __init__(
-            self, iteration_axis: int = 1,
-            target_image_shape: Tuple[int, int] = (512, 512)
+        self,
+        patch_shape: Tuple[int, int, int] = (512, 1, 512),
+        n_patches_per_image: int = 10,
+        n_phases: int = 10,
     ):
-        self.iteration_axis = iteration_axis
-        self.target_image_shape = target_image_shape
+        self.patch_shape = patch_shape
+        self.n_patches_per_image = n_patches_per_image
+        self.n_phases = n_phases
+        self._patches: List[dict] = []
+
+        self.patch_extractor: PatchExtractor | None = None
 
         self.patients = {}
         self.percentiles = None
 
-    def calculate_percentiles(self, lower: int = 1, upper: int = 99):
+    def calculate_percentiles(self, lower: int = 0.1, upper: int = 99.9):
+        logger.debug(f"Calculating {lower=}/{upper=} percentiles")
         percentiles = {}
         accumulated = {}
         for patient_id, patient in self.patients.items():
@@ -47,12 +54,17 @@ class CBCTBoostingDataset(Dataset):
 
         self.percentiles = percentiles
 
+        logger.info(
+            f"Dataset {lower=}/{upper=} percentiles are "
+            f"{percentiles['approx_global']}. Use these values for boosting/inference."
+        )
+
     @staticmethod
     def preprocess(
-            image: np.ndarray,
-            target_image_shape: Tuple[Union[None, int], ...] = None,
-            input_value_range: Tuple[float, float] = None,
-            output_value_range: Tuple[float, float] = None,
+        image: np.ndarray,
+        target_image_shape: Tuple[Union[None, int], ...] = None,
+        input_value_range: Tuple[float, float] = None,
+        output_value_range: Tuple[float, float] = None,
     ):
         if input_value_range is not None and output_value_range is not None:
             image = rescale_range(
@@ -68,15 +80,48 @@ class CBCTBoostingDataset(Dataset):
         return image
 
     def add_patient(
-            self,
-            patient_id: Union[str, int],
-            pseudo_average_image: np.ndarray,
-            average_image: np.ndarray,
+        self,
+        patient_id: Union[str, int],
+        pseudo_average_image: np.ndarray,
+        average_image: np.ndarray,
     ):
+        if pseudo_average_image.ndim != 4:
+            raise RuntimeError(
+                "Pseudo average image must be a 4D image, i.e., (time, x, y, z)"
+            )
+        if average_image.ndim != 3:
+            raise RuntimeError("Average image must be a 3D image, i.e., (x, y, z)")
+
+        # add color channels and add to dict
         self.patients[patient_id] = {
-            "pseudo_average_image": pseudo_average_image,
-            "average_image": average_image,
+            "pseudo_average_image": pseudo_average_image[:, None],
+            "average_image": average_image[None],
         }
+
+    def add_patient_from_filepath(
+        self,
+        patient_id: Union[str, int],
+        pseudo_average_image: PathLike,
+        average_image: PathLike,
+    ):
+        pseudo_average_image = sitk.ReadImage(
+            str(pseudo_average_image), sitk.sitkFloat32
+        )
+        average_image = sitk.ReadImage(str(average_image), sitk.sitkFloat32)
+
+        # convert to numpy
+        pseudo_average_image = sitk.GetArrayFromImage(pseudo_average_image)
+        average_image = sitk.GetArrayFromImage(average_image)
+
+        # swap axes for ITK -> numpy
+        # pseudo_average_image = np.swapaxes(pseudo_average_image, 0, 2)
+        # average_image = np.swapaxes(average_image, 0, 2)
+
+        self.add_patient(
+            patient_id=patient_id,
+            pseudo_average_image=pseudo_average_image,
+            average_image=average_image,
+        )
 
     @classmethod
     def load(cls, filepath: PathLike):
@@ -91,180 +136,100 @@ class CBCTBoostingDataset(Dataset):
         with open(filepath, "wb") as f:
             pickle.dump(self.__dict__, f)
 
+    def compile_patch_slicings(self):
+        self._patches = []
+        for patient_id, patient in self.patients.items():
+            average_image = patient["average_image"]
+            logger.debug(f"Create patch slicings for {patient_id=}")
+
+            image_shape = average_image.shape
+
+            # squeeze 1-sized patch shape axes, e.g. (512, 1, 512) -> (512, 512)
+            sqeeze_axes = {i for i, size in enumerate(self.patch_shape) if size == 1}
+
+            extractor = PatchExtractor(
+                patch_shape=self.patch_shape,
+                array_shape=image_shape,
+                squeeze_patch_axes=sqeeze_axes,
+            )
+
+            proba_map = average_image - average_image.min()
+            # proba map has no color axis
+            proba_map = proba_map[0]
+            # roi = np.zeros_like(proba_map)
+            # roi[:, 125:126, :] = 1
+            # proba_map *= roi
+            slicings = extractor.extract_random(
+                n_random=self.n_patches_per_image, proba_map=proba_map
+            )
+
+            for slicing in slicings:
+                for i_phase in range(self.n_phases):
+                    self._patches.append(
+                        {
+                            "patient_id": patient_id,
+                            "slicing": slicing,
+                            "i_phase": i_phase,
+                        }
+                    )
+
     def __len__(self):
-        return sum(
-            patient["average_image"].shape[self.iteration_axis]
-            for patient in self.patients.values()
-        )
+        return len(self.patients) * self.n_patches_per_image * self.n_phases
 
     def __getitem__(self, idx):
         if not self.percentiles:
-            raise RuntimeError("Please calculate percentiles first")
+            self.calculate_percentiles()
+        if not self._patches:
+            self.compile_patch_slicings()
 
-        for patient in self.patients.values():
-            iteration_axis_length = patient["average_image"].shape[self.iteration_axis]
-            if (_idx := idx - iteration_axis_length) < 0:
+        data = self._patches[idx]
+        patient_id = data["patient_id"]
+        slicing = data["slicing"]
+        i_phase = data["i_phase"]
 
-                pavg_slice = patient["pseudo_average_image"][:, :, idx, :]
-                avg_slice = patient["average_image"][:, idx, :]
+        logger.debug(f"Return patch {patient_id} / {slicing=} / {i_phase=}")
+        pseudo_average_image = self.patients[patient_id]["pseudo_average_image"]
+        average_image = self.patients[patient_id]["average_image"]
+        average_patch = average_image[slicing]
+        # average_patch = CBCTBoostingDataset.preprocess(
+        #     average_patch,
+        #     input_value_range=self.percentiles["approx_global"]["average_image"],
+        #     output_value_range=(0.0, 1.0),
+        # )
 
-                pavg_slice = CBCTBoostingDataset.preprocess(
-                    pavg_slice,
-                    target_image_shape=(None,) + self.target_image_shape,
-                    input_value_range=self.percentiles["approx_global"][
-                        "pseudo_average_image"
-                    ],
-                    output_value_range=(0.0, 1.0),
-                )
-                avg_slice = CBCTBoostingDataset.preprocess(
-                    avg_slice,
-                    target_image_shape=self.target_image_shape,
-                    input_value_range=self.percentiles["approx_global"][
-                        "average_image"
-                    ],
-                    output_value_range=(0.0, 1.0),
-                )
+        pseudo_average_patch = pseudo_average_image[(i_phase,) + slicing]
 
-                return {
-                    "pseudo_average_image": pavg_slice,
-                    "average_image": avg_slice,
-                }
-            else:
-                idx = _idx
-        else:
-            raise IndexError("Index out of range")
+        # pseudo_average_patch = CBCTBoostingDataset.preprocess(
+        #     pseudo_average_patch,
+        #     input_value_range=self.percentiles["approx_global"]["pseudo_average_image"],
+        #     output_value_range=(0.0, 1.0),
+        # )
 
-    @staticmethod
-    def compile_from_reconstructions(
-            pseudo_average_filepath: PathLike, average_filepath: PathLike
-    ):
-        pseudo_average_image = sitk.ReadImage(
-            str(pseudo_average_filepath), sitk.sitkFloat32
-        )
-        average_image = sitk.ReadImage(str(average_filepath), sitk.sitkFloat32)
-
-        # convert to numpy
-        pseudo_average_image = sitk.GetArrayFromImage(pseudo_average_image)
-        average_image = sitk.GetArrayFromImage(average_image)
-
-        if pseudo_average_image.ndim != 4:
-            raise RuntimeError(
-                "Pseudo average image must be a 4D image, i.e., "
-                "(time dim, spatial dim, spatial dim, spatial dim)"
-            )
-        if average_image.ndim != 3:
-            raise RuntimeError(
-                "Average image must be a 3D image, i.e., "
-                "(spatial dim, spatial dim, spatial dim)"
-            )
-
-        return pseudo_average_image, average_image
-
-    @staticmethod
-    def compile_from_raw_data(
-            projections_filepath: PathLike,
-            geometry_filepath: PathLike,
-            signal_filepath: PathLike,
-            motion_mask_filepath: Optional[PathLike] = None,
-            n_bins: int = 10,
-            reconstruction_params: Optional[Dict] = None,
-    ):
-        # convert all filepaths to pathlib's Path objects for consistent handling
-        (
-            projections_filepath,
-            geometry_filepath,
-            signal_filepath,
-            motion_mask_filepath,
-        ) = to_path(
-            projections_filepath,
-            geometry_filepath,
-            signal_filepath,
-            motion_mask_filepath,
-        )
-
-        pseudo_average_binning = PseudoAverageBinning.from_file(
-            signal_filepath, n_bins=n_bins
-        )
-        reconstructor_pseudo_average = ROOSTER4DReconstructor(
-            detector_binning=1, respiratory_binning=pseudo_average_binning
-        )
-        reconstructor_average = FDKReconstructor(
-            detector_binning=1, respiratory_binning=None
-        )
-        reconstructor_average_cg = CGReconstructor(
-            detector_binning=1, respiratory_binning=None
-        )
-
-        with TemporaryDirectory() as temp_directory:
-            temp_directory = Path(temp_directory)
-
-
-            reconstructor_average_cg.reconstruct(
-                path=projections_filepath.parent,
-                regexp=projections_filepath.name,
-                geometry=geometry_filepath,
-                output=temp_directory / "average.mha",
-                post_process=False,
-                **{
-                    'dimension': (304, 250, 390),
-                    'spacing': (1.0, 1.0, 1.0),
-                    'origin': (-161, -128, -195),
-                    'fp': 'CudaRayCast',
-                    'bp': 'CudaVoxelBased',
-                    'niterations': 40,
-                }
-            )
-
-            # # run reconstruction for corresponding real average images
-            # reconstructor_average.reconstruct(
-            #     path=projections_filepath.parent,
-            #     regexp=projections_filepath.name,
-            #     geometry=geometry_filepath,
-            #     output=temp_directory / "average.mha",
-            #     post_process=False,
-            #     **presets.FDK,
-            # )
-
-            # run reconstruction for pseudo average images
-            reconstructor_pseudo_average.reconstruct(
-                path=projections_filepath.parent,
-                regexp=projections_filepath.name,
-                geometry=geometry_filepath,
-                motionmask=motion_mask_filepath,
-                output=temp_directory / "pseudo_average.mha",
-                post_process=False,
-                **presets.ROOSTER4D,
-            )
-
-            return CBCTBoostingDataset.compile_from_reconstructions(
-                pseudo_average_filepath=temp_directory / "pseudo_average.mha",
-                average_filepath=temp_directory / "average.mha",
-            )
+        return {
+            "pseudo_average_image": pseudo_average_patch,
+            "average_image": average_patch,
+        }
 
 
 if __name__ == "__main__":
-    dataset = CBCTBoostingDataset(target_image_shape=(390, 304))
-    pseudo_average_image, average_image = dataset.compile_from_raw_data(
-        projections_filepath='/datalake/4d_cbct_lmu/Hamburg/correctedProjs.mhd',
-        geometry_filepath='/datalake/4d_cbct_lmu/Hamburg/geom.xml',
-        signal_filepath='/datalake/4d_cbct_lmu/Hamburg/cphase_adjusted_0.08.txt'
+    init_fancy_logging()
+
+    logging.getLogger(__name__).setLevel(logging.DEBUG)
+    logging.getLogger("boosting").setLevel(logging.DEBUG)
+    dataset = CBCTBoostingDataset(patch_shape=(512, 1, 512))
+    dataset.add_patient_from_filepath(
+        "pat1",
+        pseudo_average_image="/datalake_fast/boosting_test/raw_data/reconstructions/rooster4d_pseudo_average.mha",
+        average_image="/datalake_fast/boosting_test/raw_data/reconstructions/fdk3d.mha",
     )
-    dataset.add_patient(
-        'pat1',
-        pseudo_average_image=pseudo_average_image,
-        average_image=average_image
-    )
+
     dataset.calculate_percentiles()
-    dataset.save("/datalake/4d_cbct_lmu/Hamburg/dataset.pkl")
-
-    dataset = CBCTBoostingDataset.load(
-        "/datalake/4d_cbct_lmu/Hamburg/dataset.pkl"
-    )
-
-    d = dataset[178]
     import matplotlib.pyplot as plt
 
-    fig, ax = plt.subplots(1, 11, sharex=True, sharey=True)
+    i = 10
+
+    fig, ax = plt.subplots(2, 10, sharex=True, sharey=True, squeeze=False)
     for n in range(10):
-        ax[n].imshow(d['pseudo_average_image'][n])
-    ax[10].imshow(d['average_image'])
+        d = dataset[i + n]
+        ax[0, n].imshow(d["pseudo_average_image"][0, :, :])
+        ax[1, n].imshow(d["average_image"][0, :, :])

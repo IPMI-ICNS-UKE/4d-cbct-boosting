@@ -1,17 +1,16 @@
-import os
 from abc import ABC, abstractmethod
 
 from boosting.binning.base import Binning
 from boosting.binning.phase import PhaseBinning, PseudoAverageBinning
-from boosting.log import LoggerMixin
+from boosting.logger import LoggerMixin
+
 
 class Reconstructor(ABC, LoggerMixin):
-
     def __init__(
-            self,
-            bin_rootdir='/home/fmadesta/software/rtk/built_v2.0.0/bin',
-            detector_binning=2,
-            respiratory_binning=None
+        self,
+        bin_rootdir="/home/fmadesta/software/rtk/built_v2.0.0/bin",
+        detector_binning=2,
+        respiratory_binning=None,
     ):
         self.bin_rootdir = bin_rootdir
 
@@ -35,7 +34,7 @@ class Reconstructor(ABC, LoggerMixin):
         if value is None or isinstance(value, Binning):
             self.__respiratory_binning = value
         else:
-            raise ValueError('Invalid binning method set.')
+            raise ValueError("Invalid binning method set.")
 
     @abstractmethod
     def _preprocessing(self, **kwargs):
@@ -50,30 +49,24 @@ class Reconstructor(ABC, LoggerMixin):
         pass
 
     def reconstruct(self, post_process=True, **kwargs):
-        self.logger.debug(f'Start reconstruction with params: {kwargs}')
+        self.logger.debug(f"Start reconstruction with params: {kwargs}")
         self._preprocessing(**kwargs)
         reconstruction_filepath = self._reconstruct(**kwargs)
         if post_process:
             self._postprocessing(reconstruction_filepath)
 
 
-if __name__ == '__main__':
-    import matplotlib.pyplot as plt
-
-
+if __name__ == "__main__":
     binning = PhaseBinning.from_file(
-        '/datalake/4d_cbct_lmu/Hamburg/cphase_adjusted_0.08.txt',
-        n_bins=10
+        "/datalake/4d_cbct_lmu/Hamburg/cphase_adjusted_0.08.txt", n_bins=10
     )
     pa_binning = PseudoAverageBinning.from_file(
-        '/datalake/4d_cbct_lmu/Hamburg/cphase_adjusted_0.08.txt',
-        n_bins=10
+        "/datalake/4d_cbct_lmu/Hamburg/cphase_adjusted_0.08.txt", n_bins=10
     )
     pa_binning.get_shifted_signal()
 
     # plt.plot(binning.signal)
     # plt.plot(pa_binning.get_shifted_signal())
-
 
     # reconstructor_rooster = ROOSTER4D(
     #     detector_binning=1,

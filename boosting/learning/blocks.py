@@ -1,4 +1,6 @@
-from typing import Union, Tuple
+from __future__ import annotations
+
+from typing import Union, Tuple, Type
 
 import torch
 import torch.nn as nn
@@ -6,14 +8,14 @@ import torch.nn as nn
 
 class _ConvNormActivation(nn.Module):
     def __init__(
-            self,
-            convolution,
-            normalization,
-            activation,
-            in_channels: int,
-            out_channels: int,
-            kernel_size: Union[int, Tuple[int]],
-            padding='same'
+        self,
+        convolution,
+        normalization,
+        activation,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: Union[int, Tuple[int]],
+        padding="same",
     ):
         super().__init__()
         self.convolution = convolution(
@@ -21,7 +23,7 @@ class _ConvNormActivation(nn.Module):
             out_channels=out_channels,
             kernel_size=kernel_size,
             padding=padding,
-            bias=False
+            bias=False,
         )
         if normalization:
             self.normalization = normalization(out_channels)
@@ -40,11 +42,11 @@ class _ConvNormActivation(nn.Module):
 
 class ConvInstanceNormReLU2D(_ConvNormActivation):
     def __init__(
-            self,
-            in_channels: int,
-            out_channels: int,
-            kernel_size: Union[int, Tuple[int, ...]],
-            padding='same'
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: Union[int, Tuple[int, ...]],
+        padding="same",
     ):
         super().__init__(
             convolution=nn.Conv2d,
@@ -53,17 +55,36 @@ class ConvInstanceNormReLU2D(_ConvNormActivation):
             in_channels=in_channels,
             out_channels=out_channels,
             kernel_size=kernel_size,
-            padding=padding
+            padding=padding,
+        )
+
+
+class ConvInstanceNormReLU3D(_ConvNormActivation):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: Union[int, Tuple[int, ...]],
+        padding="same",
+    ):
+        super().__init__(
+            convolution=nn.Conv3d,
+            normalization=nn.InstanceNorm3d,
+            activation=nn.ReLU,
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            padding=padding,
         )
 
 
 class ConvReLU2D(_ConvNormActivation):
     def __init__(
-            self,
-            in_channels: int,
-            out_channels: int,
-            kernel_size: Union[int, Tuple[int, ...]],
-            padding='same'
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: Union[int, Tuple[int, ...]],
+        padding="same",
     ):
         super().__init__(
             convolution=nn.Conv2d,
@@ -72,18 +93,75 @@ class ConvReLU2D(_ConvNormActivation):
             in_channels=in_channels,
             out_channels=out_channels,
             kernel_size=kernel_size,
-            padding=padding
+            padding=padding,
         )
 
 
-class ResidualDenseBlock2D(nn.Module):
+class ConvReLU3D(_ConvNormActivation):
     def __init__(
-            self,
-            in_channels,
-            out_channels: int = 32,
-            growth_rate: int = 16,
-            n_layers: int = 4,
-            convolution_block: nn.Module = ConvInstanceNormReLU2D
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: Union[int, Tuple[int, ...]],
+        padding="same",
+    ):
+        super().__init__(
+            convolution=nn.Conv3d,
+            normalization=None,
+            activation=nn.ReLU,
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            padding=padding,
+        )
+
+
+class ConvInstanceNormMish2D(_ConvNormActivation):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: Union[int, Tuple[int, ...]],
+        padding="same",
+    ):
+        super().__init__(
+            convolution=nn.Conv2d,
+            normalization=nn.InstanceNorm2d,
+            activation=nn.Mish,
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            padding=padding,
+        )
+
+
+class ConvInstanceNormMish3D(_ConvNormActivation):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: Union[int, Tuple[int, ...]],
+        padding="same",
+    ):
+        super().__init__(
+            convolution=nn.Conv3d,
+            normalization=nn.InstanceNorm3d,
+            activation=nn.Mish,
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            padding=padding,
+        )
+
+
+class _ResidualDenseBlock(nn.Module):
+    def __init__(
+        self,
+        convolution_block: Type[nn.Module],
+        in_channels: int,
+        out_channels: int = 32,
+        growth_rate: int = 16,
+        n_layers: int = 4,
     ):
         super().__init__()
 
@@ -96,10 +174,10 @@ class ResidualDenseBlock2D(nn.Module):
             conv = convolution_block(
                 in_channels=in_channels,
                 out_channels=self.growth_rate,
-                kernel_size=(3, 3),
-                padding='same',
+                kernel_size=3,
+                padding="same",
             )
-            name = f'conv_block_{i_layer}'
+            name = f"conv_block_{i_layer}"
 
             self.add_module(name, conv)
 
@@ -108,14 +186,14 @@ class ResidualDenseBlock2D(nn.Module):
         self.local_feature_fusion = convolution_block(
             in_channels=in_channels,
             out_channels=self.out_channels,
-            kernel_size=(1, 1),
-            padding='same'
+            kernel_size=1,
+            padding="same",
         )
 
     def forward(self, x):
         outputs = []
         for i_layer in range(self.n_layers):
-            layer = self.get_submodule(f'conv_block_{i_layer}')
+            layer = self.get_submodule(f"conv_block_{i_layer}")
             stacked = torch.cat((x, *outputs), dim=1)
             x_out = layer(stacked)
             outputs.append(x_out)
@@ -127,3 +205,124 @@ class ResidualDenseBlock2D(nn.Module):
         x_out = x + x_out
 
         return x_out
+
+
+class ResidualDenseBlock2D(_ResidualDenseBlock):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int = 32,
+        growth_rate: int = 16,
+        n_layers: int = 4,
+        convolution_block: Type[nn.Module] = ConvInstanceNormReLU2D,
+    ):
+        super().__init__(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            growth_rate=growth_rate,
+            n_layers=n_layers,
+            convolution_block=convolution_block,
+        )
+
+
+class ResidualDenseBlock3D(_ResidualDenseBlock):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int = 32,
+        growth_rate: int = 16,
+        n_layers: int = 4,
+        convolution_block: Type[nn.Module] = ConvInstanceNormReLU3D,
+    ):
+        super().__init__(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            growth_rate=growth_rate,
+            n_layers=n_layers,
+            convolution_block=convolution_block,
+        )
+
+
+class EncoderBlock(nn.Module):
+    def __init__(
+        self,
+        convolution_layer: Type[nn.Module],
+        downsampling_layer: Type[nn.Module],
+        norm_layer: Type[nn.Module],
+        in_channels,
+        out_channels,
+        n_convolutions: int = 1,
+        convolution_kwargs: dict | None = None,
+        downsampling_kwargs: dict | None = None,
+    ):
+        super().__init__()
+
+        if not convolution_kwargs:
+            convolution_kwargs = {}
+        if not downsampling_kwargs:
+            downsampling_kwargs = {}
+
+        self.down = downsampling_layer(**downsampling_kwargs)
+
+        layers = []
+        for i_conv in range(n_convolutions):
+            layers.append(
+                convolution_layer(
+                    in_channels=in_channels if i_conv == 0 else out_channels,
+                    out_channels=out_channels,
+                    **convolution_kwargs,
+                )
+            )
+            if norm_layer:
+                layers.append(norm_layer(out_channels))
+            layers.append(nn.LeakyReLU(inplace=True))
+        self.convs = nn.Sequential(*layers)
+
+    def forward(self, *inputs):
+        x = self.down(*inputs)
+        return self.convs(x)
+
+
+class DecoderBlock(nn.Module):
+    def __init__(
+        self,
+        convolution_layer: Type[nn.Module],
+        upsampling_layer: Type[nn.Module],
+        norm_layer: Type[nn.Module],
+        in_channels,
+        out_channels,
+        n_convolutions: int = 1,
+        convolution_kwargs: dict | None = None,
+        upsampling_kwargs: dict | None = None,
+    ):
+        super().__init__()
+
+        if not convolution_kwargs:
+            convolution_kwargs = {}
+        if not upsampling_kwargs:
+            upsampling_kwargs = {}
+
+        self.up = upsampling_layer(**upsampling_kwargs)
+
+        layers = []
+        for i_conv in range(n_convolutions):
+            layers.append(
+                convolution_layer(
+                    in_channels=in_channels if i_conv == 0 else out_channels,
+                    out_channels=out_channels,
+                    **convolution_kwargs,
+                )
+            )
+            if norm_layer:
+                layers.append(norm_layer(out_channels))
+            layers.append(nn.LeakyReLU(inplace=True))
+        self.convs = nn.Sequential(*layers)
+
+    def forward(self, x1, x2):
+        x1 = self.up(x1)
+        if x2 is not None:
+            x = torch.cat([x2, x1], dim=1)
+        else:
+            x = x1
+        x = self.convs(x)
+        return x
