@@ -27,7 +27,7 @@ In order to build this image you need to perform the following steps:
 3. Build the Docker image by executing `cd docker && ./build_docker.sh`. This will take some time.
 
 ## Phantom data set
-We privide a [4D CBCT phantom data set](https://icns-nas1.uke.uni-hamburg.de/owncloud10/index.php/s/94bs82gk3hxOBzD) for test purposes.
+We privide a [4D CBCT phantom data set](https://doi.org/10.5281/zenodo.10303690) for test purposes.
 
 Details:
 - 4D CBCT Scanner: Varian TrueBeam
